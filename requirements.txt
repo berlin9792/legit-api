@@ -1,8 +1,6 @@
-
 fastapi
 uvicorn[standard]
 duckdb
 huggingface_hub
-numpy
-pandas
+fsspec
 pyarrow

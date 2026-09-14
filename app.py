@@ -22,29 +22,41 @@ con = None
 
 def init_duckdb():
     global con
-    con = duckdb.connect(database=":memory:", read_only=False)
-    con.execute("INSTALL httpfs; LOAD httpfs;")
-    con.execute("SET memory_limit='250MB';")          # Strict 250MB RAM limit
-    con.execute("SET threads=1;")                     # Single thread for memory safety
-    con.execute("SET enable_object_cache=false;")
-    con.execute("SET preserve_insertion_order=false;")
-    
-    if HF_TOKEN:
-        con.execute(f"SET http_headers = '{{\"Authorization\": \"Bearer {HF_TOKEN}\"}}';")
+    try:
+        con = duckdb.connect(database=":memory:", read_only=False)
+        con.execute("INSTALL httpfs; LOAD httpfs;")
+        con.execute("SET memory_limit='250MB';")          # Render 512MB RAM safe limit
+        con.execute("SET threads=1;")                     # Single thread (Zero RAM spikes)
+        con.execute("SET enable_object_cache=false;")
+        con.execute("SET preserve_insertion_order=false;")
+        
+        # DuckDB 1.0+ Modern Secret Setup (Zero Startup Crash)
+        if HF_TOKEN:
+            try:
+                con.execute(f"""
+                    CREATE OR REPLACE SECRET hf_http_secret (
+                        TYPE HTTP,
+                        EXTRA_HTTP_HEADERS MAP {{'Authorization': 'Bearer {HF_TOKEN}'}}
+                    );
+                """)
+            except Exception as e:
+                print(f"ℹ️ Secret configuration info: {e}")
+                
+        print("✅ DuckDB initialized successfully.")
+    except Exception as e:
+        print(f"❌ Error during DuckDB initialization: {e}")
 
 def load_bucket_urls():
-    """Hugging Face FileSystem se split files ki direct URL list load karta hai"""
+    """Hugging Face Bucket se direct file URLs load karta hai"""
     global PARQUET_FILE_URLS
     try:
-        fs = HfFileSystem(token=HF_TOKEN)
-        # Search path in bucket
+        fs = HfFileSystem(token=HF_TOKEN or None)
         search_path = f"buckets/{BUCKET_NAME}/{SPLITS_FOLDER}"
-        files = fs.ls(search_path, detail=False)
         
+        files = fs.ls(search_path, detail=False)
         urls = []
         for f in sorted(files):
             if f.endswith(".parquet"):
-                # Clean path to filename
                 file_name = f.split("/")[-1]
                 direct_url = f"https://huggingface.co/buckets/{BUCKET_NAME}/resolve/main/{SPLITS_FOLDER}/{file_name}"
                 urls.append(direct_url)
@@ -53,23 +65,28 @@ def load_bucket_urls():
             PARQUET_FILE_URLS = urls
             print(f"✅ Successfully loaded {len(PARQUET_FILE_URLS)} split parquet URLs!")
         else:
-            print("⚠️ No .parquet files found in directory.")
+            print("⚠️ No .parquet files found in target folder.")
             
     except Exception as e:
-        print(f"⚠️ Error scanning bucket with HfFileSystem: {e}")
+        print(f"⚠️ Notice while loading bucket files: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Server Startup
     init_duckdb()
     load_bucket_urls()
     yield
+    # Server Shutdown
     if con:
-        con.close()
+        try:
+            con.close()
+        except:
+            pass
 
 app = FastAPI(
     title="High-Speed Mobile Lookup API",
     description="DuckDB Parquet Engine (512MB RAM Safe)",
-    version="2.0",
+    version="2.1",
     lifespan=lifespan
 )
 
@@ -87,7 +104,7 @@ def home():
         "status": "online",
         "service": "Mobile Lookup API",
         "loaded_splits": len(PARQUET_FILE_URLS),
-        "memory_limit": "250MB (Render Safe)"
+        "memory_safety": "Render 512MB RAM Compliant"
     }
 
 # 🔍 MAIN SEARCH ENDPOINT
@@ -98,18 +115,18 @@ def search_mobile(
 ):
     clean_mobile = "".join(filter(str.isdigit, mobile.strip()))
     if not clean_mobile:
-        raise HTTPException(status_code=400, detail="Invalid mobile number.")
+        raise HTTPException(status_code=400, detail="Invalid mobile number provided.")
 
     if not PARQUET_FILE_URLS:
-        # Retry loading if empty
         load_bucket_urls()
         if not PARQUET_FILE_URLS:
             raise HTTPException(status_code=500, detail="Parquet split files not found in bucket.")
 
+    if not con:
+        init_duckdb()
+
     try:
         cursor = con.cursor()
-        
-        # Pass exact list of URLs directly to DuckDB
         files_param = str(PARQUET_FILE_URLS)
         
         query = f"""
@@ -120,8 +137,6 @@ def search_mobile(
         """
         
         cursor.execute(query, [clean_mobile])
-        
-        # Native zero-memory extraction (No pandas overhead)
         col_names = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
         cursor.close()

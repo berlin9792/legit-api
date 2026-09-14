@@ -1,11 +1,10 @@
 import os
 import gc
-import json
-import urllib.request
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 import duckdb
+from huggingface_hub import HfFileSystem
 
 # ==============================================================================
 # ⚙️ CONFIGURATION
@@ -25,57 +24,52 @@ def init_duckdb():
     global con
     con = duckdb.connect(database=":memory:", read_only=False)
     con.execute("INSTALL httpfs; LOAD httpfs;")
-    con.execute("SET allow_asterisks_in_http_paths = true;")
-    con.execute("SET memory_limit='200MB';")          # Render 512MB RAM Strict Lock
-    con.execute("SET threads=1;")                     # Single thread (Zero RAM Spike)
+    con.execute("SET memory_limit='250MB';")          # Strict 250MB RAM limit
+    con.execute("SET threads=1;")                     # Single thread for memory safety
     con.execute("SET enable_object_cache=false;")
     con.execute("SET preserve_insertion_order=false;")
     
     if HF_TOKEN:
         con.execute(f"SET http_headers = '{{\"Authorization\": \"Bearer {HF_TOKEN}\"}}';")
 
-def fetch_bucket_file_urls():
-    """Python standard library se directly HF Bucket ke saare split files list karta hai"""
+def load_bucket_urls():
+    """Hugging Face FileSystem se split files ki direct URL list load karta hai"""
     global PARQUET_FILE_URLS
-    api_url = f"https://huggingface.co/api/buckets/{BUCKET_NAME}/tree/{SPLITS_FOLDER}"
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
-
     try:
-        req = urllib.request.Request(api_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as response:
-            items = json.loads(response.read().decode())
+        fs = HfFileSystem(token=HF_TOKEN)
+        # Search path in bucket
+        search_path = f"buckets/{BUCKET_NAME}/{SPLITS_FOLDER}"
+        files = fs.ls(search_path, detail=False)
+        
+        urls = []
+        for f in sorted(files):
+            if f.endswith(".parquet"):
+                # Clean path to filename
+                file_name = f.split("/")[-1]
+                direct_url = f"https://huggingface.co/buckets/{BUCKET_NAME}/resolve/main/{SPLITS_FOLDER}/{file_name}"
+                urls.append(direct_url)
+        
+        if urls:
+            PARQUET_FILE_URLS = urls
+            print(f"✅ Successfully loaded {len(PARQUET_FILE_URLS)} split parquet URLs!")
+        else:
+            print("⚠️ No .parquet files found in directory.")
             
-            urls = []
-            for item in items:
-                path = item.get("path", item.get("name", ""))
-                if path.endswith(".parquet"):
-                    urls.append(f"https://huggingface.co/buckets/{BUCKET_NAME}/resolve/main/{path}")
-            
-            if urls:
-                PARQUET_FILE_URLS = sorted(urls)
-                print(f"✅ Successfully loaded {len(PARQUET_FILE_URLS)} split parquet URLs!")
-                return
     except Exception as e:
-        print(f"ℹ️ Direct API listing notice: {e}")
-
-    # Fallback: Agar API na mile toh standard resolve pattern
-    if not PARQUET_FILE_URLS:
-        PARQUET_FILE_URLS = [
-            f"https://huggingface.co/buckets/{BUCKET_NAME}/resolve/main/{SPLITS_FOLDER}/*.parquet"
-        ]
+        print(f"⚠️ Error scanning bucket with HfFileSystem: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_duckdb()
-    fetch_bucket_file_urls()
+    load_bucket_urls()
     yield
     if con:
         con.close()
 
 app = FastAPI(
     title="High-Speed Mobile Lookup API",
-    description="Render 512MB RAM Safe DuckDB Parquet Engine",
-    version="2.2",
+    description="DuckDB Parquet Engine (512MB RAM Safe)",
+    version="2.0",
     lifespan=lifespan
 )
 
@@ -93,13 +87,13 @@ def home():
         "status": "online",
         "service": "Mobile Lookup API",
         "loaded_splits": len(PARQUET_FILE_URLS),
-        "memory_limit": "200MB (Render Safe)"
+        "memory_limit": "250MB (Render Safe)"
     }
 
 # 🔍 MAIN SEARCH ENDPOINT
 @app.get("/search")
 def search_mobile(
-    mobile: str = Query(..., description="10-digit mobile number to search", min_length=5, max_length=15),
+    mobile: str = Query(..., description="Mobile number to search", min_length=5, max_length=15),
     limit: int = Query(5, le=10, description="Max results")
 ):
     clean_mobile = "".join(filter(str.isdigit, mobile.strip()))
@@ -107,17 +101,17 @@ def search_mobile(
         raise HTTPException(status_code=400, detail="Invalid mobile number.")
 
     if not PARQUET_FILE_URLS:
-        raise HTTPException(status_code=500, detail="Parquet URLs not initialized.")
+        # Retry loading if empty
+        load_bucket_urls()
+        if not PARQUET_FILE_URLS:
+            raise HTTPException(status_code=500, detail="Parquet split files not found in bucket.")
 
     try:
         cursor = con.cursor()
         
-        # Files parameter format
-        if len(PARQUET_FILE_URLS) == 1:
-            files_param = repr(PARQUET_FILE_URLS[0])
-        else:
-            files_param = str(PARQUET_FILE_URLS)
-
+        # Pass exact list of URLs directly to DuckDB
+        files_param = str(PARQUET_FILE_URLS)
+        
         query = f"""
             SELECT {COLUMNS}
             FROM read_parquet({files_param})
@@ -126,6 +120,8 @@ def search_mobile(
         """
         
         cursor.execute(query, [clean_mobile])
+        
+        # Native zero-memory extraction (No pandas overhead)
         col_names = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
         cursor.close()
@@ -146,4 +142,7 @@ def search_mobile(
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "splits_loaded": len(PARQUET_FILE_URLS)}
+    return {
+        "status": "ok", 
+        "splits_loaded": len(PARQUET_FILE_URLS)
+    }

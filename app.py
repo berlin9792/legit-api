@@ -7,7 +7,7 @@ import duckdb
 from huggingface_hub import HfFileSystem
 
 # ==============================================================================
-# ⚙️ CONFIGURATION (100% PUBLIC BUCKET - NO TOKEN NEEDED)
+# ⚙️ CONFIGURATION (100% PUBLIC BUCKET)
 # ==============================================================================
 BUCKET_NAME = "Zerotracelegit/HiTeckNuMinfo-bucket"
 SPLITS_FOLDER = "users_data_splits"
@@ -28,15 +28,16 @@ def init_duckdb():
         con.execute("SET threads=1;")                     # Zero memory spike
         con.execute("SET enable_object_cache=false;")
         con.execute("SET preserve_insertion_order=false;")
-        print("✅ DuckDB initialized successfully (Public Mode).")
+        con.execute("SET http_keep_alive=true;")
+        print("✅ DuckDB initialized successfully.")
     except Exception as e:
         print(f"❌ Error initializing DuckDB: {e}")
 
 def load_bucket_urls():
-    """Public bucket se bina token ke saare split files ke direct link uthata hai"""
+    """HF Bucket se direct public download links generate karta hai (NO /resolve/main/)"""
     global PARQUET_FILE_URLS
     try:
-        fs = HfFileSystem()  # No token needed for public buckets
+        fs = HfFileSystem()
         search_path = f"buckets/{BUCKET_NAME}/{SPLITS_FOLDER}"
         
         files = fs.ls(search_path, detail=False)
@@ -44,7 +45,8 @@ def load_bucket_urls():
         for f in sorted(files):
             if f.endswith(".parquet"):
                 file_name = f.split("/")[-1]
-                direct_url = f"https://huggingface.co/buckets/{BUCKET_NAME}/resolve/main/{SPLITS_FOLDER}/{file_name}"
+                # ✅ FIXED: Correct Direct Bucket URL without /resolve/main/
+                direct_url = f"https://huggingface.co/buckets/{BUCKET_NAME}/{SPLITS_FOLDER}/{file_name}"
                 urls.append(direct_url)
         
         if urls:
@@ -54,7 +56,7 @@ def load_bucket_urls():
             print("⚠️ No .parquet files found in directory.")
             
     except Exception as e:
-        print(f"⚠️ Notice while loading bucket files: {e}")
+        print(f"⚠️ Error while loading bucket files: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -69,8 +71,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="High-Speed Mobile Lookup API",
-    description="Public Parquet Search Engine (512MB RAM Safe)",
-    version="2.2",
+    description="DuckDB Parquet Engine (512MB RAM Safe)",
+    version="2.3",
     lifespan=lifespan
 )
 
@@ -87,8 +89,8 @@ def home():
     return {
         "status": "online",
         "service": "Mobile Lookup API",
-        "access": "Public (No Auth)",
-        "loaded_splits": len(PARQUET_FILE_URLS),
+        "access": "Public Bucket",
+        "total_splits_loaded": len(PARQUET_FILE_URLS),
         "memory_limit": "250MB (Render Safe)"
     }
 
@@ -114,7 +116,7 @@ def search_mobile(
         cursor = con.cursor()
         files_param = str(PARQUET_FILE_URLS)
         
-        # Public HTTP range query
+        # Public HTTP Range Query
         query = f"""
             SELECT {COLUMNS}
             FROM read_parquet({files_param})

@@ -1,6 +1,4 @@
-fastapi
-uvicorn[standard]
-duckdb
-huggingface_hub
-fsspec
-pyarrow
+fastapi==0.110.0
+uvicorn==0.28.0
+duckdb==0.10.1
+pyarrow==15.0.0

@@ -1,8 +1,11 @@
+import os
+from fastapi import FastAPI, Request, Query
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import duckdb
 from huggingface_hub import HfFileSystem
 
+# Initialize FastAPI App
 app = FastAPI()
 
 # ---- DuckDB with public Hugging Face access ----
@@ -45,12 +48,10 @@ async def fetch_data(number: str = Query(None)):
         )
 
     try:
-        # Query the remote Parquet file directly (no caching)
-        query = f"""
-        SELECT * FROM read_parquet('{FILE_URL}')
-        WHERE "Number" = '{number}'
-        """
-        result = con.execute(query)
+        # SQL Injection Safe Query
+        query = f'SELECT * FROM read_parquet(?) WHERE "Number" = ?'
+        result = con.execute(query, [FILE_URL, number])
+        
         columns = [desc[0] for desc in result.description]
         rows = result.fetchall()
         records = [dict(zip(columns, row)) for row in rows]
@@ -78,5 +79,5 @@ async def fetch_data(number: str = Query(None)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
-	
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)

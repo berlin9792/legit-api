@@ -25,7 +25,7 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
             content={
                 "status": "rejected",
                 "message": "Invalid endpoint. Use /?number=XXXXXXXXXX",
-                "Developer": "@shreeapi"
+                "Developer": "@theplayerror"
             }
         )
     return JSONResponse(

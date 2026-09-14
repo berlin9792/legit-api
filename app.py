@@ -1,83 +1,104 @@
 import os
-from fastapi import FastAPI, Request, Query
-from fastapi.responses import JSONResponse
-from starlette.exceptions import HTTPException as StarletteHTTPException
+import gc
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 import duckdb
-from huggingface_hub import HfFileSystem
 
-# Initialize FastAPI App
-app = FastAPI()
+app = FastAPI(
+    title="High-Speed Mobile Lookup API",
+    description="Ultra-fast Parquet search engine optimized for Render 512MB RAM",
+    version="2.0"
+)
 
-# ---- DuckDB with public Hugging Face access ----
-con = duckdb.connect()
-hf_fs = HfFileSystem(token=False)
-con.register_filesystem(hf_fs)
+# CORS Enabled (Taaki website/frontend se bhi direct call kar sako)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# ---- Public file URL ----
-FILE_URL = "hf://buckets/Zerotracelegit/HiTeckNuMinfo-bucket/users_data.parquet"
+# 🌐 HUGGING FACE BUCKET SPLITS PATH (Wildcard *.parquet se saare parts connect honge)
+PARQUET_GLOB_URL = "https://huggingface.co/buckets/Zerotracelegit/HiTeckNuMinfo-bucket/resolve/main/users_data_splits/*.parquet"
 
-# ---- Error handler ----
-@app.exception_handler(StarletteHTTPException)
-async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
-    if exc.status_code == 404:
-        return JSONResponse(
-            status_code=404,
-            content={
-                "status": "rejected",
-                "message": "Invalid endpoint. Use /?number=XXXXXXXXXX",
-                "Developer": "@shreeapi"
-            }
-        )
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"status": "error", "detail": exc.detail, "Developer": "@shreeapi"}
-    )
+# Agar Bucket private hai toh Render Environment me HF_TOKEN set kar sakte hain
+HF_TOKEN = os.getenv("HF_TOKEN", "")
 
-# ---- Single endpoint ----
+# --- 🛡️ DUCKDB 512MB STRICT RAM LOCK CONFIGURATION ---
+con = duckdb.connect(database=":memory:", read_only=False)
+con.execute("INSTALL httpfs; LOAD httpfs;")
+con.execute("SET memory_limit='200MB';")          # 200MB strict cap (Render safe)
+con.execute("SET threads=1;")                     # 1 thread = Zero RAM overhead
+con.execute("SET enable_object_cache=false;")     # Cache off (Saves RAM)
+con.execute("SET preserve_insertion_order=false;")
+
+if HF_TOKEN:
+    con.execute(f"SET http_headers = '{{\"Authorization\": \"Bearer {HF_TOKEN}\"}}';")
+
+# Required 8 Columns
+COLUMNS = "mobile, name, fname, address, alt, circle, id, email"
+
+
+# 🏠 1. HOME ENDPOINT
 @app.get("/")
-async def fetch_data(number: str = Query(None)):
-    # Validate input
-    if not number or not number.isdigit() or len(number) < 10 or len(number) > 15:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "status": "rejected",
-                "message": "Invalid parameter. Use /?number=XXXXXXXXXX",
-                "Developer": "@theplayerror"
-            }
-        )
+def home():
+    return {
+        "status": "online",
+        "service": "Mobile Lookup API",
+        "storage": "Hugging Face Bucket (Sorted Parquet Chunks)",
+        "memory_safety": "Render 512MB RAM Compliant"
+    }
+
+
+# 🔍 2. MAIN SEARCH ENDPOINT (Fetch by Mobile Number)
+@app.get("/search")
+def search_mobile(
+    mobile: str = Query(..., description="10-digit mobile number to search", min_length=5, max_length=15),
+    limit: int = Query(5, le=10, description="Max results (default 5)")
+):
+    # Input Sanitization (Sirf digits rakho)
+    clean_mobile = "".join(filter(str.isdigit, mobile.strip()))
+    if not clean_mobile:
+        raise HTTPException(status_code=400, detail="Invalid mobile number. Only digits allowed.")
 
     try:
-        # "Number" ki jagah "mobile" column use kiya hai
-        query = f'SELECT * FROM read_parquet(?) WHERE CAST("mobile" AS VARCHAR) = ?'
-        result = con.execute(query, [FILE_URL, str(number)])
-        
-        columns = [desc[0] for desc in result.description]
-        rows = result.fetchall()
-        records = [dict(zip(columns, row)) for row in rows]
+        cursor = con.cursor()
 
-        if not records:
-            return JSONResponse(
-                status_code=404,
-                content={"status": "not_found", "phone": number, "Developer": "@shreeapi"}
-            )
+        # Ultra-Fast Query: Sorted data hone ki wajah se sirf 1-2 row groups check honge
+        query = f"""
+            SELECT {COLUMNS}
+            FROM read_parquet('{PARQUET_GLOB_URL}')
+            WHERE CAST(mobile AS VARCHAR) = ?
+            LIMIT {limit}
+        """
+        
+        cursor.execute(query, [clean_mobile])
+        
+        # Zero-Pandas Native Fetch (Instant & 0% Memory Spike)
+        col_names = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+        cursor.close()
+
+        # Format rows into clean JSON
+        results = [dict(zip(col_names, row)) for row in rows]
+
+        # Explicit Garbage Collection (Har request ke baad RAM free)
+        gc.collect()
 
         return {
             "status": "success",
-            "Data": records,
-            "Developer": "@theplayerror"
+            "searched_mobile": clean_mobile,
+            "total_found": len(results),
+            "data": results
         }
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "status": "error",
-                "message": f"Database error: {str(e)}",
-                "Developer": "@theplayerror"
-            }
-        )
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    except Exception as e:
+        gc.collect()
+        raise HTTPException(status_code=500, detail=f"Database query error: {str(e)}")
+
+
+# 💓 3. HEALTH CHECK ENDPOINT (Render ko 24/7 Jagaye Rakhne ke liye)
+@app.get("/health")
+def health():
+    return {"status": "ok", "ram_state": "healthy"}

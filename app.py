@@ -25,7 +25,7 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
             content={
                 "status": "rejected",
                 "message": "Invalid endpoint. Use /?number=XXXXXXXXXX",
-                "Developer": "@theplayerror"
+                "Developer": "@shreeapi"
             }
         )
     return JSONResponse(
@@ -48,9 +48,9 @@ async def fetch_data(number: str = Query(None)):
         )
 
     try:
-        # SQL Injection Safe Query
-        query = f'SELECT * FROM read_parquet(?) WHERE "Number" = ?'
-        result = con.execute(query, [FILE_URL, number])
+        # "Number" ki jagah "mobile" column use kiya hai
+        query = f'SELECT * FROM read_parquet(?) WHERE CAST("mobile" AS VARCHAR) = ?'
+        result = con.execute(query, [FILE_URL, str(number)])
         
         columns = [desc[0] for desc in result.description]
         rows = result.fetchall()

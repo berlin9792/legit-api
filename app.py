@@ -7,9 +7,8 @@ import duckdb
 from huggingface_hub import HfFileSystem
 
 # ==============================================================================
-# ⚙️ CONFIGURATION
+# ⚙️ CONFIGURATION (100% PUBLIC BUCKET - NO TOKEN NEEDED)
 # ==============================================================================
-HF_TOKEN = os.getenv("HF_TOKEN", "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")
 BUCKET_NAME = "Zerotracelegit/HiTeckNuMinfo-bucket"
 SPLITS_FOLDER = "users_data_splits"
 
@@ -25,32 +24,19 @@ def init_duckdb():
     try:
         con = duckdb.connect(database=":memory:", read_only=False)
         con.execute("INSTALL httpfs; LOAD httpfs;")
-        con.execute("SET memory_limit='250MB';")          # Render 512MB RAM safe limit
-        con.execute("SET threads=1;")                     # Single thread (Zero RAM spikes)
+        con.execute("SET memory_limit='250MB';")          # Render 512MB RAM Safe
+        con.execute("SET threads=1;")                     # Zero memory spike
         con.execute("SET enable_object_cache=false;")
         con.execute("SET preserve_insertion_order=false;")
-        
-        # DuckDB 1.0+ Modern Secret Setup (Zero Startup Crash)
-        if HF_TOKEN:
-            try:
-                con.execute(f"""
-                    CREATE OR REPLACE SECRET hf_http_secret (
-                        TYPE HTTP,
-                        EXTRA_HTTP_HEADERS MAP {{'Authorization': 'Bearer {HF_TOKEN}'}}
-                    );
-                """)
-            except Exception as e:
-                print(f"ℹ️ Secret configuration info: {e}")
-                
-        print("✅ DuckDB initialized successfully.")
+        print("✅ DuckDB initialized successfully (Public Mode).")
     except Exception as e:
-        print(f"❌ Error during DuckDB initialization: {e}")
+        print(f"❌ Error initializing DuckDB: {e}")
 
 def load_bucket_urls():
-    """Hugging Face Bucket se direct file URLs load karta hai"""
+    """Public bucket se bina token ke saare split files ke direct link uthata hai"""
     global PARQUET_FILE_URLS
     try:
-        fs = HfFileSystem(token=HF_TOKEN or None)
+        fs = HfFileSystem()  # No token needed for public buckets
         search_path = f"buckets/{BUCKET_NAME}/{SPLITS_FOLDER}"
         
         files = fs.ls(search_path, detail=False)
@@ -65,18 +51,16 @@ def load_bucket_urls():
             PARQUET_FILE_URLS = urls
             print(f"✅ Successfully loaded {len(PARQUET_FILE_URLS)} split parquet URLs!")
         else:
-            print("⚠️ No .parquet files found in target folder.")
+            print("⚠️ No .parquet files found in directory.")
             
     except Exception as e:
         print(f"⚠️ Notice while loading bucket files: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Server Startup
     init_duckdb()
     load_bucket_urls()
     yield
-    # Server Shutdown
     if con:
         try:
             con.close()
@@ -85,8 +69,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="High-Speed Mobile Lookup API",
-    description="DuckDB Parquet Engine (512MB RAM Safe)",
-    version="2.1",
+    description="Public Parquet Search Engine (512MB RAM Safe)",
+    version="2.2",
     lifespan=lifespan
 )
 
@@ -103,8 +87,9 @@ def home():
     return {
         "status": "online",
         "service": "Mobile Lookup API",
+        "access": "Public (No Auth)",
         "loaded_splits": len(PARQUET_FILE_URLS),
-        "memory_safety": "Render 512MB RAM Compliant"
+        "memory_limit": "250MB (Render Safe)"
     }
 
 # 🔍 MAIN SEARCH ENDPOINT
@@ -129,6 +114,7 @@ def search_mobile(
         cursor = con.cursor()
         files_param = str(PARQUET_FILE_URLS)
         
+        # Public HTTP range query
         query = f"""
             SELECT {COLUMNS}
             FROM read_parquet({files_param})

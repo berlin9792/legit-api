@@ -4,6 +4,7 @@ import json
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pyarrow.compute as pc
 from huggingface_hub import HfFileSystem
@@ -36,7 +37,7 @@ def fetch_master_index():
             print(f"✅ Master Index loaded successfully! ({len(master_index)} splits indexed)")
             return True
         else:
-            print("⚠️ index.json not found in bucket. Still building in Colab?")
+            print("⚠️ index.json not found in bucket.")
             return False
     except Exception as e:
         print(f"❌ Error loading index.json: {e}")
@@ -44,20 +45,17 @@ def fetch_master_index():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # App start hote hi filesystem connect aur index load hoga
     fetch_master_index()
     yield
-    # Cleanup on shutdown
     gc.collect()
 
 app = FastAPI(
     title="High-Speed Mobile Lookup API",
     description="Indexed Parquet Search Engine (Render 512MB RAM Compliant)",
-    version="4.5",
+    version="4.6",
     lifespan=lifespan
 )
 
-# CORS Enable karein (Frontend/Website se direct call karne ke liye)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -73,7 +71,7 @@ def home():
         "status": "online",
         "engine": "Master Indexed Binary Search",
         "total_indexed_files": len(master_index),
-        "index_status": "Ready 🟢" if len(master_index) > 0 else "Index Building in Colab ⏳",
+        "index_status": "Ready 🟢" if len(master_index) > 0 else "Not Ready ❌",
         "memory_limit": "512MB Safe (< 50MB Active RAM)"
     }
 
@@ -84,18 +82,16 @@ def search_mobile(
     limit: int = Query(5, le=10, description="Max results")
 ):
     global master_index
-    # Clean mobile number
     clean_mobile = "".join(filter(str.isdigit, mobile.strip()))
     if not clean_mobile:
         raise HTTPException(status_code=400, detail="Invalid mobile number. Only digits allowed.")
 
-    # Agar starting me index load nahi hua tha, toh request par fresh load karo
     if not master_index:
         fetch_master_index()
         if not master_index:
             raise HTTPException(
                 status_code=503, 
-                detail="Dataset index is currently building in Colab. Please wait a few minutes."
+                detail="Dataset index is not available. Please check bucket."
             )
 
     # ⚡ STEP 1: Find matching files using In-Memory Index (Takes 0.0001 sec)
@@ -120,22 +116,21 @@ def search_mobile(
             with fs.open(file_path, "rb") as f:
                 pq_file = pq.ParquetFile(f)
                 
-                # Check column compatibility
                 selected_cols = [c for col in COLUMNS_LIST if (c := col) in pq_file.schema.names]
                 
-                # Iterate row groups of the matched file
                 for rg_idx in range(pq_file.num_row_groups):
                     tbl = pq_file.read_row_group(rg_idx, columns=selected_cols)
                     
-                    # Compute Match
-                    mobile_col = pc.cast(tbl["mobile"], pc.string()) if tbl["mobile"].type != pc.string() else tbl["mobile"]
-                    mask = pc.equal(mobile_col, clean_mobile)
-                    filtered = tbl.filter(mask)
-                    
-                    if filtered.num_rows > 0:
-                        results.extend(filtered.to_pylist())
-                        if len(results) >= limit:
-                            break
+                    if "mobile" in tbl.column_names:
+                        # ✅ FIXED: pa.string() instead of pc.string()
+                        mobile_col = pc.cast(tbl["mobile"], pa.string()) if tbl["mobile"].type != pa.string() else tbl["mobile"]
+                        mask = pc.equal(mobile_col, clean_mobile)
+                        filtered = tbl.filter(mask)
+                        
+                        if filtered.num_rows > 0:
+                            results.extend(filtered.to_pylist())
+                            if len(results) >= limit:
+                                break
                             
             if len(results) >= limit:
                 break

@@ -10,8 +10,9 @@ import pyarrow.compute as pc
 from huggingface_hub import HfFileSystem
 
 # ==============================================================================
-# ⚙️ CONFIGURATION (100% PUBLIC ACCESS - NO EXPIRED TOKENS)
+# ⚙️ CONFIGURATION (Safe Environment Token with Fallback)
 # ==============================================================================
+HF_TOKEN = os.getenv("HF_TOKEN", None)  # Render Environment se uthayega
 BUCKET_NAME = "Zerotracelegit/HiTeckNuMinfo-bucket"
 SPLITS_FOLDER = "users_data_splits"
 
@@ -19,13 +20,13 @@ SPLITS_FOLDER = "users_data_splits"
 COLUMNS_LIST = ["mobile", "name", "fname", "address", "alt", "circle", "id", "email"]
 # ==============================================================================
 
-# Global Public FileSystem (token=None for public access)
-fs = HfFileSystem()
+# Initialize FileSystem (Uses token if available, else anonymous)
+fs = HfFileSystem(token=HF_TOKEN) if HF_TOKEN else HfFileSystem()
 master_index = []
 load_error = None
 
 def fetch_master_index():
-    """Public Bucket se direct index.json load karta hai bina kisi token ke"""
+    """Bucket se direct index.json load karta hai"""
     global master_index, load_error
     index_path = f"buckets/{BUCKET_NAME}/{SPLITS_FOLDER}/index.json"
     try:
@@ -49,7 +50,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="High-Speed Mobile Lookup API",
     description="Indexed Parquet Search Engine (Render 512MB RAM Compliant)",
-    version="6.0",
+    version="6.5",
     lifespan=lifespan
 )
 
@@ -61,7 +62,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 🏠 1. HOME & HEALTH STATUS (Supports GET & HEAD for Render)
+# 🏠 1. HOME & HEALTH STATUS
 @app.api_route("/", methods=["GET", "HEAD"])
 def home():
     if not master_index:
@@ -71,6 +72,7 @@ def home():
         "status": "online",
         "engine": "Master Indexed Binary Search",
         "total_indexed_files": len(master_index),
+        "auth_mode": "Authenticated Token (High Rate-Limit) 🚀" if HF_TOKEN else "Anonymous Public 🌐",
         "index_status": "Ready 🟢" if len(master_index) > 0 else "Loading Error ❌",
         "error_details": load_error,
         "memory_limit": "512MB Safe (< 50MB Active RAM)"
@@ -147,7 +149,7 @@ def search_mobile(
         gc.collect()
         raise HTTPException(status_code=500, detail=f"Query execution error: {str(e)}")
 
-# 💓 3. HEALTH CHECK (UptimeRobot ke liye)
+# 💓 3. HEALTH CHECK
 @app.get("/health")
 def health():
     return {

@@ -10,9 +10,8 @@ import pyarrow.compute as pc
 from huggingface_hub import HfFileSystem
 
 # ==============================================================================
-# ⚙️ CONFIGURATION
+# ⚙️ CONFIGURATION (100% PUBLIC ACCESS - NO EXPIRED TOKENS)
 # ==============================================================================
-HF_TOKEN = os.getenv("HF_TOKEN", "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")
 BUCKET_NAME = "Zerotracelegit/HiTeckNuMinfo-bucket"
 SPLITS_FOLDER = "users_data_splits"
 
@@ -20,17 +19,16 @@ SPLITS_FOLDER = "users_data_splits"
 COLUMNS_LIST = ["mobile", "name", "fname", "address", "alt", "circle", "id", "email"]
 # ==============================================================================
 
-# Global FileSystem & Index Cache
-fs = HfFileSystem(token=HF_TOKEN)
+# Global Public FileSystem (token=None for public access)
+fs = HfFileSystem()
 master_index = []
 load_error = None
 
 def fetch_master_index():
-    """Bina 3565 files ko list kiye direct index.json load karta hai"""
+    """Public Bucket se direct index.json load karta hai bina kisi token ke"""
     global master_index, load_error
     index_path = f"buckets/{BUCKET_NAME}/{SPLITS_FOLDER}/index.json"
     try:
-        # Direct single-file stream (Takes ~0.05s)
         with fs.open(index_path, "rb") as f:
             content = f.read().decode("utf-8")
             master_index = json.loads(content)
@@ -39,12 +37,11 @@ def fetch_master_index():
         return True
     except Exception as e:
         load_error = str(e)
-        print(f"❌ Error loading index.json directly: {e}")
+        print(f"❌ Error loading index.json: {e}")
         return False
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Server start hote hi direct load karega
     fetch_master_index()
     yield
     gc.collect()
@@ -52,7 +49,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="High-Speed Mobile Lookup API",
     description="Indexed Parquet Search Engine (Render 512MB RAM Compliant)",
-    version="5.1",
+    version="6.0",
     lifespan=lifespan
 )
 
@@ -64,8 +61,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 🏠 1. HOME & HEALTH STATUS
-@app.get("/")
+# 🏠 1. HOME & HEALTH STATUS (Supports GET & HEAD for Render)
+@app.api_route("/", methods=["GET", "HEAD"])
 def home():
     if not master_index:
         fetch_master_index()
@@ -95,7 +92,7 @@ def search_mobile(
         if not master_index:
             raise HTTPException(
                 status_code=500, 
-                detail=f"Index failed to load from bucket. Reason: {load_error}"
+                detail=f"Index failed to load from bucket: {load_error}"
             )
 
     # ⚡ STEP 1: In-Memory Range Check (0.0001s)

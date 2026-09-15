@@ -10,7 +10,7 @@ import pyarrow.compute as pc
 from huggingface_hub import HfFileSystem
 
 # ==============================================================================
-# ⚙️ CONFIGURATION (Token Integrated for Zero-Rate Limit)
+# ⚙️ CONFIGURATION
 # ==============================================================================
 HF_TOKEN = os.getenv("HF_TOKEN", "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")
 BUCKET_NAME = "Zerotracelegit/HiTeckNuMinfo-bucket"
@@ -20,36 +20,31 @@ SPLITS_FOLDER = "users_data_splits"
 COLUMNS_LIST = ["mobile", "name", "fname", "address", "alt", "circle", "id", "email"]
 # ==============================================================================
 
-fs = None
+# Global FileSystem & Index Cache
+fs = HfFileSystem(token=HF_TOKEN)
 master_index = []
-
-def get_fs():
-    global fs
-    if fs is None:
-        fs = HfFileSystem(token=HF_TOKEN)
-    return fs
+load_error = None
 
 def fetch_master_index():
-    """Hugging Face Bucket se consolidated index.json load karta hai"""
-    global master_index
+    """Bina 3565 files ko list kiye direct index.json load karta hai"""
+    global master_index, load_error
+    index_path = f"buckets/{BUCKET_NAME}/{SPLITS_FOLDER}/index.json"
     try:
-        filesystem = get_fs()
-        index_path = f"buckets/{BUCKET_NAME}/{SPLITS_FOLDER}/index.json"
-        
-        if filesystem.exists(index_path):
-            with filesystem.open(index_path, "rb") as f:
-                master_index = json.loads(f.read().decode())
-            print(f"✅ Master Index loaded successfully! ({len(master_index)} splits indexed)")
-            return True
-        else:
-            print("⚠️ index.json not found in bucket.")
-            return False
+        # Direct single-file stream (Takes ~0.05s)
+        with fs.open(index_path, "rb") as f:
+            content = f.read().decode("utf-8")
+            master_index = json.loads(content)
+        load_error = None
+        print(f"✅ Master Index loaded successfully! ({len(master_index)} splits indexed)")
+        return True
     except Exception as e:
-        print(f"❌ Error loading index.json: {e}")
+        load_error = str(e)
+        print(f"❌ Error loading index.json directly: {e}")
         return False
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Server start hote hi direct load karega
     fetch_master_index()
     yield
     gc.collect()
@@ -57,7 +52,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="High-Speed Mobile Lookup API",
     description="Indexed Parquet Search Engine (Render 512MB RAM Compliant)",
-    version="5.0",
+    version="5.1",
     lifespan=lifespan
 )
 
@@ -69,7 +64,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 🏠 1. HOME ENDPOINT
+# 🏠 1. HOME & HEALTH STATUS
 @app.get("/")
 def home():
     if not master_index:
@@ -79,7 +74,8 @@ def home():
         "status": "online",
         "engine": "Master Indexed Binary Search",
         "total_indexed_files": len(master_index),
-        "index_status": "Ready 🟢" if len(master_index) > 0 else "Loading Index ⏳",
+        "index_status": "Ready 🟢" if len(master_index) > 0 else "Loading Error ❌",
+        "error_details": load_error,
         "memory_limit": "512MB Safe (< 50MB Active RAM)"
     }
 
@@ -98,11 +94,11 @@ def search_mobile(
         fetch_master_index()
         if not master_index:
             raise HTTPException(
-                status_code=503, 
-                detail="Dataset index is loading. Please refresh in 5 seconds."
+                status_code=500, 
+                detail=f"Index failed to load from bucket. Reason: {load_error}"
             )
 
-    # ⚡ STEP 1: Fast in-memory lookup (0.0001 sec)
+    # ⚡ STEP 1: In-Memory Range Check (0.0001s)
     matching_files = [
         item["file"] for item in master_index 
         if item["min"] <= clean_mobile <= item["max"]
@@ -116,13 +112,12 @@ def search_mobile(
             "data": []
         }
 
-    # ⚡ STEP 2: Stream only the matching split file (~0.15 sec)
+    # ⚡ STEP 2: Stream ONLY the matched split file (~0.15s)
     results = []
-    filesystem = get_fs()
     try:
         for fname in matching_files:
             file_path = f"buckets/{BUCKET_NAME}/{SPLITS_FOLDER}/{fname}"
-            with filesystem.open(file_path, "rb") as f:
+            with fs.open(file_path, "rb") as f:
                 pq_file = pq.ParquetFile(f)
                 selected_cols = [c for col in COLUMNS_LIST if (c := col) in pq_file.schema.names]
                 
@@ -153,12 +148,12 @@ def search_mobile(
 
     except Exception as e:
         gc.collect()
-        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Query execution error: {str(e)}")
 
-# 💓 3. HEALTH CHECK
+# 💓 3. HEALTH CHECK (UptimeRobot ke liye)
 @app.get("/health")
 def health():
     return {
         "status": "ok", 
-        "splits_loaded": len(master_index)
+        "splits_indexed": len(master_index)
     }
